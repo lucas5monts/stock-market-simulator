@@ -7,6 +7,7 @@ test("short math tracks liability, margin, and realized cover cash", () => {
   assert.equal(shortLiability(position, 90), 900);
   assert.equal(shortAccountValue(position, 90), 600);
   assert.equal(realizedShortCashDelta(position, 5, 90), 300);
+  assert.equal(realizedShortCashDelta(position, 10, 120), 300);
 });
 
 test("option premiums and marks include intrinsic plus time value", () => {

@@ -23,6 +23,49 @@ let chartAnimationFrame = null;
 let previousPrices = {};
 let chartHoverRatio = null;
 let lastFill = null;
+let commandPaletteOpen = false;
+let scenarioSymbol = "AAPL";
+let scenarioSide = "buy";
+let scenarioQty = 10;
+let scenarioMove = 8;
+let timeMachineEvent = "ai-run";
+let timeMachineStep = 18;
+let timeMachineTimer = null;
+
+const TIME_MACHINE_EVENTS = {
+  "ai-run": {
+    label: "AI Momentum Run",
+    symbol: "NVDA",
+    drift: 1.018,
+    volatility: 0.024,
+    start: 126,
+    note: "A fast trend with violent pullbacks.",
+  },
+  "crash-tape": {
+    label: "Crash Tape",
+    symbol: "SPY",
+    drift: 0.986,
+    volatility: 0.038,
+    start: 482,
+    note: "Liquidity fades, gaps get larger, patience matters.",
+  },
+  "crypto-cycle": {
+    label: "Crypto Mania",
+    symbol: "BTC-USD",
+    drift: 1.01,
+    volatility: 0.055,
+    start: 64000,
+    note: "A 24/7 tape where sizing beats conviction.",
+  },
+};
+
+const STRESS_SCENARIOS = [
+  { name: "Market -5%", equity: -0.05, crypto: -0.08, volatility: 1.15 },
+  { name: "Tech -10%", equity: -0.1, crypto: -0.06, volatility: 1.25 },
+  { name: "Crypto -20%", equity: -0.02, crypto: -0.2, volatility: 1.35 },
+  { name: "Short squeeze", equity: 0.04, crypto: 0.06, short: 0.18, volatility: 1.2 },
+  { name: "Vol spike", equity: -0.03, crypto: -0.08, volatility: 1.55 },
+];
 
 function loadDb() {
   try {
@@ -260,6 +303,7 @@ function renderDashboard() {
     market: "Live Market",
     crypto: "Crypto",
     montecarlo: "Scenarios",
+    lab: "Trading Lab",
     account: "Account",
     settings: "Settings",
   }[activePage];
@@ -289,6 +333,7 @@ function renderDashboard() {
           <button class="side-link ${activePage === "market" ? "active" : ""}" data-page="market"><strong>Live Market</strong></button>
           <button class="side-link ${activePage === "crypto" ? "active" : ""}" data-page="crypto"><strong>Crypto</strong></button>
           <button class="side-link ${activePage === "montecarlo" ? "active" : ""}" data-page="montecarlo"><strong>Scenarios</strong></button>
+          <button class="side-link ${activePage === "lab" ? "active" : ""}" data-page="lab"><strong>Lab</strong></button>
           <button class="side-link ${activePage === "account" ? "active" : ""}" data-page="account"><strong>Account</strong></button>
           <button class="side-link ${activePage === "settings" ? "active" : ""}" data-page="settings"><strong>Settings</strong></button>
           <div class="sidebar-card">
@@ -309,6 +354,7 @@ function renderDashboard() {
           ${activePage === "market" ? liveMarketPage(user) : ""}
           ${activePage === "crypto" ? cryptoPage(user) : ""}
           ${activePage === "montecarlo" ? monteCarloPage(metrics) : ""}
+          ${activePage === "lab" ? labPage(user, metrics) : ""}
           ${activePage === "account" ? accountPage(user, metrics) : ""}
           ${activePage === "settings" ? settingsPage(user) : ""}
         </div>
@@ -318,15 +364,22 @@ function renderDashboard() {
         <button data-page="market" class="${activePage === "market" ? "active" : ""}">Market</button>
         <button data-page="crypto" class="${activePage === "crypto" ? "active" : ""}">Crypto</button>
         <button data-page="montecarlo" class="${activePage === "montecarlo" ? "active" : ""}">Scenarios</button>
+        <button data-page="lab" class="${activePage === "lab" ? "active" : ""}">Lab</button>
         <button data-page="account" class="${activePage === "account" ? "active" : ""}">Account</button>
         <button data-page="settings" class="${activePage === "settings" ? "active" : ""}">Settings</button>
       </nav>
+      ${commandPaletteOpen ? commandPalette(user) : ""}
     </section>
   `;
   bindDashboard();
   drawSparklines();
   if (activePage === "dashboard") drawChart();
   if (activePage === "montecarlo") runMonteCarlo();
+  if (activePage === "lab") {
+    drawPortfolioMap(user);
+    drawTimeMachine();
+    updateScenarioPreview();
+  }
   updateOrderPreview();
 }
 
@@ -577,6 +630,243 @@ function monteCarloPage(metrics) {
   `;
 }
 
+function labPage(user, metrics) {
+  return `
+    <section class="lab-grid">
+      ${dailyBriefPanel(user, metrics)}
+      ${marketMoodPanel(user)}
+      ${riskEnginePanel(user, metrics)}
+      ${scenarioBuilderPanel(user)}
+      ${coachPanel(user, metrics)}
+      ${portfolioMapPanel(user)}
+      ${timeMachinePanel()}
+      ${tradeReplayPanel(user)}
+      ${achievementsPanel(user, metrics)}
+    </section>
+  `;
+}
+
+function dailyBriefPanel(user, metrics) {
+  const best = bestMover(user);
+  const risk = riskScore(user, metrics);
+  const netTone = metrics.returnPct >= 0 ? "up" : "down";
+  return `
+    <section class="panel lab-hero">
+      <div>
+        <span class="eyebrow">Daily brief</span>
+        <h2>${metrics.returnPct >= 0 ? "You are playing offense." : "Capital defense mode."}</h2>
+        <p class="muted">${dailyBriefText(user, metrics, best, risk)}</p>
+      </div>
+      <div class="brief-stack">
+        ${stat("Net Worth", fmt.format(metrics.netWorth), netTone)}
+        ${stat("Risk Score", `${risk}/100`, risk > 70 ? "down" : risk > 42 ? "warn" : "up")}
+      </div>
+    </section>
+  `;
+}
+
+function dailyBriefText(user, metrics, best, risk) {
+  if (!positionsCount(user)) return "No positions yet. Use the lab to rehearse risk before the first fill.";
+  const mover = best ? `${best.symbol} is your loudest ticker at ${best.change >= 0 ? "+" : ""}${best.change.toFixed(2)}%.` : "Live movers are still loading.";
+  const exposure = metrics.netWorth ? (metrics.exposure / metrics.netWorth) * 100 : 0;
+  return `${mover} Gross exposure is ${exposure.toFixed(0)}% of net worth, with a ${risk > 70 ? "high" : risk > 42 ? "moderate" : "controlled"} risk profile.`;
+}
+
+function marketMoodPanel(user) {
+  const symbols = [...new Set([...user.watchlist, ...Object.values(MARKET_SECTIONS).flat(), ...Object.values(CRYPTO_SECTIONS).flat()])];
+  const live = symbols.map((symbol) => ({ symbol, quote: quotes[symbol] })).filter((item) => item.quote && Number.isFinite(item.quote.changePercent));
+  const green = live.filter((item) => item.quote.changePercent >= 0).length;
+  const red = live.length - green;
+  const leader = live.slice().sort((a, b) => b.quote.changePercent - a.quote.changePercent)[0];
+  const laggard = live.slice().sort((a, b) => a.quote.changePercent - b.quote.changePercent)[0];
+  const breadth = live.length ? (green / live.length) * 100 : 0;
+  return `
+    <section class="panel mood-panel">
+      <div class="panel-head"><h2>Market Mood</h2><span class="pill">${live.length ? `${green}/${live.length} green` : "Loading"}</span></div>
+      <div class="mood-meter"><span style="width: ${Math.max(3, breadth)}%"></span></div>
+      <div class="mood-grid">
+        ${metricRow("Risk Meter", breadth >= 58 ? "Risk-on" : breadth <= 42 ? "Risk-off" : "Mixed tape")}
+        ${metricRow("Best mover", leader ? `${escapeHtml(leader.symbol)} ${signedPct(leader.quote.changePercent)}` : "-")}
+        ${metricRow("Worst mover", laggard ? `${escapeHtml(laggard.symbol)} ${signedPct(laggard.quote.changePercent)}` : "-")}
+        ${metricRow("Crypto heat", cryptoHeat())}
+      </div>
+    </section>
+  `;
+}
+
+function riskEnginePanel(user, metrics) {
+  return `
+    <section class="panel risk-panel">
+      <div class="panel-head">
+        <div><h2>Risk Engine</h2><span class="muted">Portfolio stress tests</span></div>
+        <span class="pill">${fmt.format(metrics.exposure)} exposure</span>
+      </div>
+      <div class="risk-grid">
+        ${STRESS_SCENARIOS.map((scenario) => stressCard(user, metrics, scenario)).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function stressCard(user, metrics, scenario) {
+  const stressed = stressNetWorth(user, scenario);
+  const delta = stressed - metrics.netWorth;
+  const tone = delta >= 0 ? "up" : "down";
+  return `
+    <div class="risk-card">
+      <span class="label">${escapeHtml(scenario.name)}</span>
+      <strong class="${tone}">${delta >= 0 ? "+" : ""}${fmt.format(delta)}</strong>
+      <span class="muted">Net worth ${fmt.format(stressed)}</span>
+    </div>
+  `;
+}
+
+function scenarioBuilderPanel(user) {
+  const normalized = normalizeSymbol(scenarioSymbol) || selectedSymbol;
+  scenarioSymbol = normalized;
+  const quote = quotes[normalized];
+  return `
+    <section class="panel scenario-panel">
+      <div class="panel-head">
+        <div><h2>Scenario Builder</h2><span class="muted">Preview a trade before it touches cash</span></div>
+        <span class="pill">${escapeHtml(normalized)}</span>
+      </div>
+      <form class="scenario-form" id="scenarioForm">
+        <div class="row-2">
+          <label class="field"><span>Symbol</span><input id="scenarioSymbolInput" maxlength="18" value="${escapeHtml(normalized)}" /></label>
+          <label class="field"><span>Action</span><select id="scenarioSideInput">
+            ${["buy", "short", "call", "put"].map((side) => `<option value="${side}" ${scenarioSide === side ? "selected" : ""}>${side.toUpperCase()}</option>`).join("")}
+          </select></label>
+        </div>
+        <div class="row-2">
+          <label class="field"><span>Size</span><input id="scenarioQtyInput" type="number" min="0.0001" step="0.0001" value="${scenarioQty}" /></label>
+          <label class="field"><span>Move %</span><input id="scenarioMoveInput" type="number" min="-80" max="120" step="0.5" value="${scenarioMove}" /></label>
+        </div>
+      </form>
+      <div class="scenario-output" id="scenarioOutput">${scenarioPreview(user, normalized, quote)}</div>
+    </section>
+  `;
+}
+
+function scenarioPreview(user, symbol, quote) {
+  const price = quote?.price || quotes[selectedSymbol]?.price || 100;
+  const qty = Math.max(0, Number(scenarioQty) || 0);
+  const move = Number(scenarioMove) || 0;
+  const movedPrice = Math.max(0.01, price * (1 + move / 100));
+  const premium = estimateOptionPremium(price);
+  const movedPremium = scenarioSide === "put"
+    ? Math.max(0.05, premium + Math.max(0, price - movedPrice) * 0.62 - premium * 0.18)
+    : Math.max(0.05, premium + Math.max(0, movedPrice - price) * 0.62 - premium * 0.18);
+  const cost = ["call", "put"].includes(scenarioSide) ? qty * premium * 100 : qty * price * (scenarioSide === "short" ? 0.5 : 1);
+  const pnl = scenarioSide === "buy"
+    ? (movedPrice - price) * qty
+    : scenarioSide === "short"
+      ? (price - movedPrice) * qty
+      : (movedPremium - premium) * qty * 100;
+  const afterCash = user.cash - cost;
+  return `
+    ${metricRow("Entry", `${escapeHtml(symbol)} @ ${fmt.format(price)}`)}
+    ${metricRow("Projected price", fmt.format(movedPrice))}
+    ${metricRow("Cash required", fmt.format(cost))}
+    ${metricRow("Scenario P&L", `<span class="${pnl >= 0 ? "up" : "down"}">${pnl >= 0 ? "+" : ""}${fmt.format(pnl)}</span>`)}
+    ${metricRow("Cash after entry", `<span class="${afterCash >= 0 ? "" : "down"}">${fmt.format(afterCash)}</span>`)}
+  `;
+}
+
+function coachPanel(user, metrics) {
+  return `
+    <section class="panel coach-panel">
+      <div class="panel-head"><h2>Trade Coach</h2><span class="pill">Local rules</span></div>
+      <div class="insight-list">
+        ${coachInsights(user, metrics).map((item) => `<div class="insight ${item.tone}"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.body)}</span></div>`).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function portfolioMapPanel(user) {
+  return `
+    <section class="panel map-panel">
+      <div class="panel-head"><h2>Portfolio Map</h2><span class="muted">Size = exposure, color = P&L</span></div>
+      <div class="map-wrap"><canvas id="portfolioMapCanvas" width="900" height="420"></canvas></div>
+    </section>
+  `;
+}
+
+function timeMachinePanel() {
+  const event = TIME_MACHINE_EVENTS[timeMachineEvent];
+  return `
+    <section class="panel time-panel">
+      <div class="panel-head">
+        <div><h2>Time Machine</h2><span class="muted">${escapeHtml(event.note)}</span></div>
+        <span class="pill">${escapeHtml(event.symbol)}</span>
+      </div>
+      <div class="time-controls">
+        <select id="timeMachineEvent">
+          ${Object.entries(TIME_MACHINE_EVENTS).map(([key, item]) => `<option value="${key}" ${key === timeMachineEvent ? "selected" : ""}>${item.label}</option>`).join("")}
+        </select>
+        <button class="ghost" id="timeBackBtn" type="button">Back</button>
+        <button class="primary" id="timePlayBtn" type="button">${timeMachineTimer ? "Pause" : "Play"}</button>
+        <button class="ghost" id="timeForwardBtn" type="button">Forward</button>
+      </div>
+      <div class="time-wrap"><canvas id="timeMachineCanvas" width="1000" height="420"></canvas></div>
+    </section>
+  `;
+}
+
+function tradeReplayPanel(user) {
+  const rows = user.history.slice(-6).reverse();
+  return `
+    <section class="panel replay-panel">
+      <div class="panel-head"><h2>Trade Replay</h2><span class="muted">${rows.length} recent fills</span></div>
+      <div class="stack">
+        ${rows.length ? rows.map((trade) => replayRow(trade)).join("") : `<div class="empty">Your replay tape will build after a few fills.</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function achievementsPanel(user, metrics) {
+  const items = achievements(user, metrics);
+  return `
+    <section class="panel achievements-panel">
+      <div class="panel-head"><h2>Achievements</h2><span class="pill">${items.filter((item) => item.done).length}/${items.length}</span></div>
+      <div class="achievement-grid">
+        ${items.map((item) => `<div class="achievement ${item.done ? "done" : ""}"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.body)}</span></div>`).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function commandPalette(user) {
+  const commands = [
+    ["search", "Search Symbol", "Jump to the chart search box"],
+    ["trade", "Place Trade", `Focus the ${selectedSymbol} ticket`],
+    ["risk", "Open Risk Engine", "Stress test the account"],
+    ["scenario", "Build Scenario", "Preview a hypothetical trade"],
+    ["time", "Time Machine", "Replay a stylized market tape"],
+    ["account", "Account", `Review ${user.name}`],
+  ];
+  return `
+    <div class="command-backdrop" data-command="close">
+      <div class="command-panel" role="dialog" aria-label="Command palette">
+        <div class="command-search">
+          <span class="label">Command palette</span>
+          <strong>Move fast without hunting through the UI</strong>
+        </div>
+        <div class="command-list">
+          ${commands.map(([key, title, body]) => `
+            <button type="button" data-command="${key}">
+              <strong>${escapeHtml(title)}</strong>
+              <span>${escapeHtml(body)}</span>
+            </button>
+          `).join("")}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function settingsPage(user) {
   return `
     <section class="settings-grid">
@@ -612,6 +902,134 @@ function settingsPage(user) {
       </div>
     </section>
   `;
+}
+
+function allPositionRows(user) {
+  const rows = [];
+  Object.entries(user.holdings).forEach(([symbol, position]) => {
+    const last = quotes[symbol]?.price || position.avg;
+    rows.push({ symbol, type: "Long", exposure: last * position.qty, pnl: (last - position.avg) * position.qty, qty: position.qty });
+  });
+  Object.entries(user.shorts).forEach(([symbol, position]) => {
+    const last = quotes[symbol]?.price || position.avg;
+    rows.push({ symbol, type: "Short", exposure: shortLiability(position, last), pnl: (position.avg - last) * position.qty, qty: position.qty });
+  });
+  user.options.forEach((option) => {
+    const underlying = quotes[option.symbol]?.price || option.underlyingAtOpen;
+    const mark = markOption(option, underlying);
+    const value = mark * option.contracts * 100;
+    const cost = option.premium * option.contracts * 100;
+    rows.push({ symbol: `${option.symbol} ${option.type}`, type: "Option", exposure: value, pnl: value - cost, qty: option.contracts });
+  });
+  return rows;
+}
+
+function isCryptoSymbol(symbol) {
+  return /-USD$/.test(symbol) && !["SPY", "QQQ", "DIA", "IWM"].includes(symbol);
+}
+
+function stressNetWorth(user, scenario) {
+  const longValue = Object.entries(user.holdings).reduce((sum, [symbol, position]) => {
+    const last = quotes[symbol]?.price || position.avg;
+    const shock = isCryptoSymbol(symbol) ? scenario.crypto ?? scenario.equity : scenario.equity;
+    return sum + Math.max(0, last * (1 + shock)) * position.qty;
+  }, 0);
+  const shortStats = Object.entries(user.shorts).reduce(
+    (stats, [symbol, position]) => {
+      const last = quotes[symbol]?.price || position.avg;
+      const baseShock = isCryptoSymbol(symbol) ? scenario.crypto ?? scenario.equity : scenario.equity;
+      const shock = scenario.short || baseShock;
+      const stressed = Math.max(0.01, last * (1 + shock));
+      stats.margin += position.margin || 0;
+      stats.pnl += (position.avg - stressed) * position.qty;
+      return stats;
+    },
+    { margin: 0, pnl: 0 }
+  );
+  const optionValue = user.options.reduce((sum, option) => {
+    const underlying = quotes[option.symbol]?.price || option.underlyingAtOpen;
+    const shock = isCryptoSymbol(option.symbol) ? scenario.crypto ?? scenario.equity : scenario.equity;
+    const stressedUnderlying = Math.max(0.01, underlying * (1 + shock));
+    const baseMark = markOption(option, underlying);
+    const stressedMark = markOption(option, stressedUnderlying) * (scenario.volatility || 1);
+    return sum + Math.max(0.05, stressedMark || baseMark) * option.contracts * 100;
+  }, 0);
+  return user.cash + longValue + optionValue + shortStats.margin + shortStats.pnl;
+}
+
+function riskScore(user, metrics) {
+  if (!metrics.netWorth) return 0;
+  const concentration = Math.max(0, ...allPositionRows(user).map((row) => row.exposure / Math.max(1, metrics.netWorth))) * 45;
+  const leverage = Math.min(2, metrics.exposure / Math.max(1, metrics.netWorth)) * 25;
+  const shorts = Object.keys(user.shorts).length * 8;
+  const options = user.options.length * 5;
+  return Math.min(100, Math.round(concentration + leverage + shorts + options));
+}
+
+function bestMover(user) {
+  return user.watchlist
+    .map((symbol) => ({ symbol, change: quotes[symbol]?.changePercent }))
+    .filter((item) => Number.isFinite(item.change))
+    .sort((a, b) => Math.abs(b.change) - Math.abs(a.change))[0];
+}
+
+function signedPct(value) {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function cryptoHeat() {
+  const crypto = Object.values(CRYPTO_SECTIONS)
+    .flat()
+    .map((symbol) => quotes[symbol]?.changePercent)
+    .filter(Number.isFinite);
+  if (!crypto.length) return "-";
+  const avg = crypto.reduce((sum, value) => sum + value, 0) / crypto.length;
+  return `${avg >= 0 ? "Hot" : "Cold"} ${signedPct(avg)}`;
+}
+
+function coachInsights(user, metrics) {
+  const rows = allPositionRows(user);
+  const insights = [];
+  if (!rows.length) {
+    return [{ title: "Rehearse first", body: "Use Scenario Builder before placing the first trade. The edge is learning before paying tuition.", tone: "warn" }];
+  }
+  const largest = rows.slice().sort((a, b) => b.exposure - a.exposure)[0];
+  const concentration = largest && metrics.netWorth ? (largest.exposure / metrics.netWorth) * 100 : 0;
+  if (concentration > 55) insights.push({ title: "Concentration warning", body: `${largest.symbol} is ${concentration.toFixed(0)}% of net worth exposure. One bad candle can steer the whole account.`, tone: "down" });
+  else insights.push({ title: "Sizing is readable", body: "No single position dominates the whole account right now.", tone: "up" });
+  if (Object.keys(user.shorts).length) insights.push({ title: "Short risk is asymmetric", body: "Your shorts can move against you faster than the margin line suggests. Stress the squeeze case before adding.", tone: "warn" });
+  if (user.options.length) insights.push({ title: "Theta clock running", body: "Synthetic options decay with time. The trade needs both direction and timing.", tone: "warn" });
+  if (user.history.length >= 8 && Math.abs(metrics.returnPct) < 1) insights.push({ title: "Activity without distance", body: "You have several fills but little return. Consider fewer, higher-conviction trades.", tone: "warn" });
+  if (metrics.returnPct > 5) insights.push({ title: "Protect the lead", body: "You have a cushion. Define what would make you reduce risk before the market defines it for you.", tone: "up" });
+  return insights.slice(0, 4);
+}
+
+function replayRow(trade) {
+  const riskNote = trade.side.includes("option")
+    ? "Defined premium risk, timing-sensitive."
+    : trade.side === "short" || trade.side === "cover"
+      ? "Short tape: squeeze and margin matter."
+      : trade.total > 2500
+        ? "Large allocation. Review sizing."
+        : "Clean small-lot fill.";
+  return `
+    <div class="replay-row">
+      <div><strong>${escapeHtml(trade.side.toUpperCase())} ${escapeHtml(trade.symbol)}</strong><span class="muted">${new Date(trade.time).toLocaleString()}</span></div>
+      <div class="right"><strong>${fmt.format(trade.total)}</strong><span class="muted">${riskNote}</span></div>
+    </div>
+  `;
+}
+
+function achievements(user, metrics) {
+  const risk = riskScore(user, metrics);
+  return [
+    { title: "First Fill", body: "Place a paper trade.", done: user.history.length > 0 },
+    { title: "Risk Manager", body: "Keep the lab risk score under 45.", done: positionsCount(user) > 0 && risk < 45 },
+    { title: "Capital Defender", body: "Stay above starting cash.", done: metrics.netWorth >= metrics.start },
+    { title: "Scenario Thinker", body: "Open the lab and preview a trade.", done: true },
+    { title: "Diversifier", body: "Hold three or more open positions.", done: positionsCount(user) >= 3 },
+    { title: "Patient Operator", body: "Keep fewer fills than watchlist names.", done: user.history.length > 0 && user.history.length < user.watchlist.length },
+  ];
 }
 
 function metricRow(label, value) {
@@ -767,11 +1185,12 @@ function applyShortCover(user, symbol, qty, price) {
   const coverQty = Math.min(qty, short.qty);
   const cashDelta = realizedShortCashDelta(short, coverQty, price);
   const coverCost = coverQty * price;
-  if (user.cash + short.margin < coverCost) return { covered: 0, ok: tradeError("Not enough cash to cover that short.") };
+  if (user.cash + cashDelta < 0) return { covered: 0, ok: tradeError("Not enough cash to cover that short.") };
   user.cash += cashDelta;
   short.qty -= coverQty;
   short.margin -= short.margin * (coverQty / (short.qty + coverQty));
   if (short.qty <= 0.000001) delete user.shorts[symbol];
+  lastFill = { side: "cover", symbol, qty: coverQty, price, total: coverCost, time: Date.now() };
   record(user, "cover", symbol, coverQty, price, coverCost);
   return { covered: coverQty, ok: true };
 }
@@ -909,7 +1328,9 @@ function historyRows(user) {
 function bindDashboard() {
   document.querySelectorAll("[data-page]").forEach((button) => {
     button.addEventListener("click", () => {
-      activePage = button.dataset.page;
+      const nextPage = button.dataset.page;
+      if (nextPage !== "lab") stopTimeMachine();
+      activePage = nextPage;
       renderDashboard();
       if (activePage === "dashboard") {
         refreshQuotes();
@@ -918,6 +1339,7 @@ function bindDashboard() {
       if (activePage === "market") refreshQuotes(true);
       if (activePage === "crypto") refreshQuotes(true);
       if (activePage === "montecarlo") runMonteCarlo();
+      if (activePage === "lab") refreshQuotes(true);
     });
   });
   document.querySelector("#sidebarToggle")?.addEventListener("click", () => {
@@ -958,6 +1380,25 @@ function bindDashboard() {
   document.querySelector("#monteForm")?.addEventListener("submit", (event) => {
     event.preventDefault();
     runMonteCarlo();
+  });
+  document.querySelector("#scenarioForm")?.addEventListener("input", handleScenarioInput);
+  document.querySelector("#timeMachineEvent")?.addEventListener("change", (event) => {
+    timeMachineEvent = event.target.value;
+    timeMachineStep = 18;
+    stopTimeMachine();
+    renderDashboard();
+  });
+  document.querySelector("#timeBackBtn")?.addEventListener("click", () => {
+    timeMachineStep = Math.max(1, timeMachineStep - 6);
+    drawTimeMachine();
+  });
+  document.querySelector("#timeForwardBtn")?.addEventListener("click", () => {
+    timeMachineStep = Math.min(72, timeMachineStep + 6);
+    drawTimeMachine();
+  });
+  document.querySelector("#timePlayBtn")?.addEventListener("click", toggleTimeMachine);
+  document.querySelectorAll("[data-command]").forEach((button) => {
+    button.addEventListener("click", () => runCommand(button.dataset.command));
   });
   document.querySelectorAll("[data-strip-symbol]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1032,6 +1473,63 @@ function bindDashboard() {
   document.querySelectorAll(".position-action").forEach((button) => {
     button.addEventListener("click", () => handlePositionAction(button));
   });
+}
+
+function handleScenarioInput() {
+  scenarioSymbol = normalizeSymbol(document.querySelector("#scenarioSymbolInput")?.value) || selectedSymbol;
+  scenarioSide = document.querySelector("#scenarioSideInput")?.value || "buy";
+  scenarioQty = Number(document.querySelector("#scenarioQtyInput")?.value || 0);
+  scenarioMove = Number(document.querySelector("#scenarioMoveInput")?.value || 0);
+  updateScenarioPreview();
+}
+
+function updateScenarioPreview() {
+  const output = document.querySelector("#scenarioOutput");
+  if (!output) return;
+  const symbol = normalizeSymbol(scenarioSymbol) || selectedSymbol;
+  output.innerHTML = scenarioPreview(currentUser(), symbol, quotes[symbol]);
+}
+
+function toggleTimeMachine() {
+  if (timeMachineTimer) {
+    stopTimeMachine();
+    renderDashboard();
+    return;
+  }
+  timeMachineTimer = setInterval(() => {
+    timeMachineStep = timeMachineStep >= 72 ? 1 : timeMachineStep + 1;
+    drawTimeMachine();
+  }, 360);
+  renderDashboard();
+}
+
+function stopTimeMachine() {
+  clearInterval(timeMachineTimer);
+  timeMachineTimer = null;
+}
+
+function runCommand(command) {
+  commandPaletteOpen = false;
+  if (command === "search") {
+    activePage = "dashboard";
+    renderDashboard();
+    document.querySelector("#symbolInput")?.focus();
+    return;
+  }
+  if (command === "trade") {
+    activePage = "dashboard";
+    renderDashboard();
+    focusTradeTicket();
+    return;
+  }
+  if (command === "risk") activePage = "lab";
+  if (command === "time") {
+    activePage = "lab";
+    timeMachineStep = 18;
+  }
+  if (command === "scenario") activePage = "lab";
+  if (command === "account") activePage = "account";
+  renderDashboard();
 }
 
 function focusTradeTicket() {
@@ -1146,7 +1644,7 @@ async function refreshQuotes(force = false) {
     }
     lastRefresh = Date.now();
     marketDataStatus = "live";
-    if (!isEditingForm() && ["dashboard", "market", "crypto", "account"].includes(activePage)) {
+    if (!isEditingForm() && ["dashboard", "market", "crypto", "account", "lab"].includes(activePage)) {
       renderDashboard();
     }
     if (shouldReloadSelectedChart && activePage === "dashboard") refreshChart(selectedSymbol);
@@ -1342,6 +1840,117 @@ function drawFillMarkers(ctx, coords, values, width, height, pad) {
     ctx.arc(point.x, point.y, 4.5, 0, Math.PI * 2);
     ctx.fill();
   });
+}
+
+function drawPortfolioMap(user) {
+  const canvas = document.querySelector("#portfolioMapCanvas");
+  if (!canvas || !user) return;
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const height = canvas.height;
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#05090e";
+  ctx.fillRect(0, 0, width, height);
+  const rows = allPositionRows(user).sort((a, b) => b.exposure - a.exposure).slice(0, 10);
+  if (!rows.length) {
+    ctx.fillStyle = "#8d99a8";
+    ctx.font = '700 24px "Geist", sans-serif';
+    ctx.fillText("Open positions become a live exposure map.", 32, 62);
+    return;
+  }
+  const maxExposure = Math.max(...rows.map((row) => row.exposure), 1);
+  const columns = Math.ceil(Math.sqrt(rows.length));
+  const cellW = width / columns;
+  const cellH = height / Math.ceil(rows.length / columns);
+  rows.forEach((row, index) => {
+    const col = index % columns;
+    const line = Math.floor(index / columns);
+    const cx = col * cellW + cellW / 2;
+    const cy = line * cellH + cellH / 2;
+    const radius = Math.max(28, Math.min(cellW, cellH) * 0.18 + (row.exposure / maxExposure) * Math.min(cellW, cellH) * 0.2);
+    const gradient = ctx.createRadialGradient(cx - radius * 0.25, cy - radius * 0.3, radius * 0.1, cx, cy, radius);
+    gradient.addColorStop(0, row.pnl >= 0 ? "rgba(114,224,166,0.92)" : "rgba(255,109,130,0.92)");
+    gradient.addColorStop(1, row.type === "Short" ? "rgba(185,200,255,0.32)" : "rgba(169,231,255,0.2)");
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = row.type === "Option" ? "rgba(216,229,242,0.72)" : "rgba(255,255,255,0.2)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = "#f7f9fc";
+    ctx.textAlign = "center";
+    ctx.font = '760 18px "Geist Mono", monospace';
+    ctx.fillText(row.symbol.split(" ")[0], cx, cy - 2);
+    ctx.fillStyle = row.pnl >= 0 ? "#72e0a6" : "#ff6d82";
+    ctx.font = '700 13px "Geist", sans-serif';
+    ctx.fillText(`${row.pnl >= 0 ? "+" : ""}${fmt.format(row.pnl)}`, cx, cy + 18);
+  });
+  ctx.textAlign = "left";
+}
+
+function drawTimeMachine() {
+  const canvas = document.querySelector("#timeMachineCanvas");
+  if (!canvas) return;
+  const event = TIME_MACHINE_EVENTS[timeMachineEvent];
+  const points = timeMachinePoints(event);
+  const visible = points.slice(0, Math.max(2, timeMachineStep));
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const height = canvas.height;
+  const pad = 38;
+  const values = points.map((point) => point.close);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const spread = max - min || 1;
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#05090e";
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = "rgba(197,212,232,0.08)";
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 5; i++) {
+    const y = (height / 5) * i;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+    ctx.stroke();
+  }
+  const coords = visible.map((point, index) => ({
+    x: pad + (index / Math.max(1, points.length - 1)) * (width - pad * 2),
+    y: height - pad - ((point.close - min) / spread) * (height - pad * 2),
+  }));
+  ctx.beginPath();
+  coords.forEach((point, index) => (index ? ctx.lineTo(point.x, point.y) : ctx.moveTo(point.x, point.y)));
+  ctx.strokeStyle = visible.at(-1).close >= visible[0].close ? "#72e0a6" : "#ff6d82";
+  ctx.lineWidth = 2.4;
+  ctx.stroke();
+  ctx.fillStyle = "#f7f9fc";
+  ctx.font = '700 24px "Geist", sans-serif';
+  ctx.fillText(`${event.label}: ${event.symbol}`, 28, 36);
+  ctx.fillStyle = "#8d99a8";
+  ctx.font = '700 14px "Geist Mono", monospace';
+  const first = visible[0].close;
+  const last = visible.at(-1).close;
+  ctx.fillText(`Tape ${timeMachineStep}/72  ${fmt.format(last)}  ${signedPct(((last - first) / first) * 100)}`, 28, 60);
+  const cursor = coords.at(-1);
+  if (cursor) {
+    ctx.fillStyle = "#dff5ff";
+    ctx.beginPath();
+    ctx.arc(cursor.x, cursor.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function timeMachinePoints(event) {
+  const points = [];
+  let price = event.start;
+  for (let index = 0; index < 72; index += 1) {
+    const wave = Math.sin(index * 0.65 + event.start) * event.volatility;
+    const jolt = Math.cos(index * 1.7) * event.volatility * 0.42;
+    price = Math.max(0.01, price * event.drift * (1 + wave + jolt));
+    points.push({ close: price });
+  }
+  return points;
 }
 
 function formatChartTime(time) {
@@ -1595,7 +2204,23 @@ function getMetrics(user) {
   return calculateMetrics(user, quotes);
 }
 
-window.addEventListener("resize", drawChart);
+window.addEventListener("resize", () => {
+  drawChart();
+  drawPortfolioMap(currentUser());
+  drawTimeMachine();
+});
+window.addEventListener("keydown", (event) => {
+  const key = event.key.toLowerCase();
+  if ((event.metaKey || event.ctrlKey) && key === "k") {
+    event.preventDefault();
+    commandPaletteOpen = !commandPaletteOpen;
+    renderDashboard();
+  }
+  if (event.key === "Escape" && commandPaletteOpen) {
+    commandPaletteOpen = false;
+    renderDashboard();
+  }
+});
 function scheduleRefresh() {
   clearInterval(refreshTimer);
   const seconds = currentUser()?.settings?.refreshSeconds || 45;

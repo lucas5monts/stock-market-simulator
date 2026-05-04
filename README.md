@@ -32,7 +32,7 @@ npm run dev
 Then open:
 
 ```text
-http://127.0.0.1:3000/
+http://localhost:3000/
 ```
 
 Do not open `public/index.html` directly with `file://`; the app uses native ES modules and API routes.
@@ -50,7 +50,7 @@ The test suite uses `node:test` and has no extra dependencies.
 Copy `.env.example` to `.env` if you want to change local server settings:
 
 ```bash
-HOST=127.0.0.1
+HOST=localhost
 PORT=3000
 CACHE_TTL=45
 FETCH_TIMEOUT_MS=5000
@@ -83,7 +83,7 @@ test/                             node:test coverage
 
 ## Security Notes
 
-- The local server binds to `127.0.0.1` by default and sends a restrictive CSP plus common browser hardening headers.
+- The local server binds to `localhost` by default and sends a restrictive CSP plus common browser hardening headers.
 - Quote and chart APIs only accept read methods, validate ticker/range/interval input, and reject upstream chart failures instead of minting synthetic tradable assets.
 - Browser-saved account data is normalized on load so tampered names, difficulty modes, watchlists, and refresh intervals cannot flow directly into UI state.
 - The passcode protects casual local access only. A real multi-user leaderboard would need server-side accounts and a server-side trade ledger.

@@ -66,7 +66,7 @@ async function request(path, fetchImpl = makeFetch(), remoteAddress = `test-${Ma
     },
   };
   await handler(req, res);
-  return { status: res.statusCode, headers: res.headers, body: JSON.parse(res.body) };
+  return { status: res.statusCode, headers: res.headers, body: res.body ? JSON.parse(res.body) : null, rawBody: res.body };
 }
 
 test("clampSymbol strips unsafe characters and bounds length", () => {
@@ -128,6 +128,14 @@ test("/healthz reports readiness", async () => {
   assert.equal(response.body.ok, true);
   assert.match(response.headers["Content-Security-Policy"], /default-src 'self'/);
   assert.equal(response.headers["X-Content-Type-Options"], "nosniff");
+});
+
+test("HEAD API responses include headers without a JSON body", async () => {
+  const response = await request("/healthz", makeFetch(), "head-test", "HEAD");
+  assert.equal(response.status, 200);
+  assert.equal(response.rawBody, "");
+  assert.equal(response.body, null);
+  assert.equal(response.headers["Content-Type"], "application/json; charset=utf-8");
 });
 
 test("rejects non-read methods", async () => {

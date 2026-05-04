@@ -5,7 +5,7 @@ const path = require("path");
 loadEnv();
 
 const PORT = toInt(process.env.PORT, 3000);
-const HOST = process.env.HOST || "127.0.0.1";
+const HOST = process.env.HOST || "localhost";
 const CACHE_TTL_MS = toInt(process.env.CACHE_TTL, 45) * 1000;
 const FETCH_TIMEOUT_MS = toInt(process.env.FETCH_TIMEOUT_MS, 5000);
 const RATE_LIMIT_WINDOW_MS = toInt(process.env.RATE_LIMIT_WINDOW_MS, 60_000);
@@ -64,7 +64,7 @@ function sendJson(res, status, payload) {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
   });
-  res.end(JSON.stringify(payload));
+  res.end(res.shouldSkipBody ? undefined : JSON.stringify(payload));
 }
 
 function sendText(res, status, body) {
@@ -268,6 +268,7 @@ function createRequestHandler(options = {}) {
         sendMethodNotAllowed(res);
         return;
       }
+      res.shouldSkipBody = req.method === "HEAD";
       if (rateLimit(req, res)) return;
       const url = new URL(req.url, `http://${req.headers.host}`);
       if (url.pathname === "/healthz") {
